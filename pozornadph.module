@@ -1,0 +1,638 @@
+<?php
+/**
+ * Implements hook_menu().
+ */
+function pozornadph_menu() {
+  $items['pozornadph/checkvat'] = array(
+    'title' => 'Check VAT',
+    'page callback' => 'pozornadph_checkvat_page',
+    'access callback' => 'pozornadph_access_callback',
+    'type' => MENU_NORMAL_ITEM,
+    'menu_name' => 'main-menu',
+    'weight' => -49,
+  );
+  return $items;
+}
+
+/* Checks if user has access to the menu item */
+function pozornadph_access_callback() {
+
+  global $user;
+  $exists = db_query(
+      'SELECT 1 FROM {pozornadph} WHERE user_id = :uid', array(':uid' => $user->uid))
+      ->fetchField();
+
+  return $exists?TRUE:FALSE;
+}
+
+
+function pozornadph_checkvat_page() {
+  global $user;
+
+  $query = db_select('pozornadph','pnd')
+  ->fields('pnd', array('plan', 'end_date'))
+  ->condition('user_id', $user->uid,'=')
+  ->condition('end_date', time(), '>=')
+  ->groupBy('pnd.end_date')
+  ->groupBy('pnd.plan');
+  $query->addExpression('COUNT(id)', 'count');
+  $plans = $query
+  ->execute();
+
+
+  //Get the companies added by current user
+  $query = db_select('node','n')
+          ->fields('n', array('nid','title'))
+          ->condition('type', 'company', '=')
+          ->condition('uid', $user->uid, '=')
+           ->orderBy('title');
+  $result = $query->execute();
+
+  $companies = array();
+  foreach ($result as $company_id) {
+    $companies[] = node_load($company_id->nid);
+  }
+
+  return theme('pozornadph_page', array('plans' => $plans, 'companies' => $companies));
+}
+
+function pozornadph_form($form, &$form_state, $companies,$plans) {
+
+  /*$day_ago = strtotime('-10 days', time());
+  dpm($day_ago);
+  dpm(format_date($day_ago));*/
+
+  global $user;
+
+  $form['companies'] = array(
+    '#tree' => TRUE,
+
+  );
+
+  $form['#attached']['js'] = array(
+      drupal_get_path('module', 'pozornadph') . '/pozornadph.js',
+  );
+
+  foreach ($companies as $company) {
+
+    $query = db_select('pozornadph_dic','pnd')
+    ->fields('pnd')
+    ->condition('user_id', $user->uid,'=')
+    ->condition('dic', $company->field_dic['und'][0]['value'], '=');
+
+    $result = $query
+    ->execute()
+    ->fetchObject();
+
+    $form['companies'][$company->nid]['title'] = array(
+      '#markup' => $company->title,
+     );
+
+     $form['companies'][$company->nid]['dic'] = array(
+      '#markup' => 'CZ' . $company->field_dic['und'][0]['value'],
+     );
+
+     $form['companies'][$company->nid]['weekly'] = array(
+         '#type' => 'checkbox',
+         '#return_value' => $company->nid,
+     );
+     $form['companies'][$company->nid]['daily'] = array(
+         '#type' => 'checkbox',
+         '#return_value' => $company->nid,
+     );
+     $form['companies'][$company->nid]['node'] = array(
+         '#type' => 'value',
+         '#value' => $company,
+     );
+
+     if (is_object($result) && isset($result->last_scanned) && isset($result->status)) {
+       if($result->status == 0) {
+         $status = t('bad status');
+       } else if ($result->status == 1) {
+         $status = t('good status');
+       } else if ($result->status == 2) {
+         $status = t('invalid VAT number');
+       } else if ($result->status == 3) {
+         $status = t('no information');
+       }
+
+       $last_scanned = format_date($result->last_scanned,'short');
+
+       $form['companies'][$company->nid]['status'] = array(
+        '#markup' => $status,
+       );
+        $form['companies'][$company->nid]['last_scanned'] = array(
+        '#markup' => $last_scanned,
+       );
+     }
+
+     if (is_object($result) && $result->plan == 0) {
+       $form['companies'][$company->nid]['weekly']['#default_value'] = TRUE;
+     }
+
+     if (is_object($result) && $result->plan == 1) {
+       $form['companies'][$company->nid]['daily']['#default_value'] = TRUE;
+     }
+
+    }
+    $form['submit'] = array(
+        '#type' => 'submit',
+        '#value' => t('Save')
+    );
+
+  return $form;
+}
+
+
+function theme_pozornadph_form($variables) {
+  $form = $variables['form'];
+  $output = '';
+  $output .= '<table id="pozornadph-table">
+           <tr>
+             <th>' . t('Company name') . '</th><th>' . t('VAT') . '</th>
+             <th>' . t('Scan') . '</th><th>'. t('Scan daily') . '</th>
+             <th>'. t('Status') . '</th><th>'. t('Last scanned') . '</th>
+           </tr>';
+  foreach (element_children($form['companies']) as $company_nid) {
+    $company = &$form['companies'][$company_nid];
+    $output .= '<tr><td>' . drupal_render($company['title'])  . '</td>';
+    $output .= '<td>' . drupal_render($company['dic'])  . '</td>';
+    $output .= '<td>' . drupal_render($company['weekly'])  . '</td>';
+    $output .= '<td>' . drupal_render($company['daily'])  . '</td>';
+    $output .= '<td>' . drupal_render($company['status'])  . '</td>';
+    $output .= '<td>' . drupal_render($company['last_scanned'])  . '</td></tr>';
+
+  }
+
+  $output .= '</table>';
+  $output .= drupal_render_children($form);
+
+  return $output;
+}
+
+function pozornadph_get_weekly_checks() {
+  global $user;
+
+  $query = db_select('pozornadph','pnd')
+  ->fields('pnd', array('plan', 'end_date'))
+  ->condition('user_id', $user->uid,'=')
+  ->condition('plan','0')
+  ->condition('end_date', time(), '>=');
+  $query->addExpression('COUNT(id)', 'count');
+  $plan_weekly = $query
+  ->execute()
+  ->fetchObject();
+
+  return $plan_weekly;
+}
+
+function pozornadph_get_daily_checks() {
+  global $user;
+
+  $query = db_select('pozornadph','pnd')
+  ->fields('pnd', array('plan', 'end_date'))
+  ->condition('user_id', $user->uid,'=')
+  ->condition('plan','1')
+  ->condition('end_date', time(), '>=');
+  $query->addExpression('COUNT(id)', 'count');
+  $plan_daily = $query
+  ->execute()
+  ->fetchObject();
+
+  return $plan_daily;
+}
+
+function pozornadph_form_validate($form, &$form_state) {
+  global $user;
+
+  //Get amount of allowed weekly checks
+  $plan_weekly = pozornadph_get_weekly_checks();
+
+
+  //Get amount of allowed daily checks
+  $plan_daily = pozornadph_get_daily_checks();
+
+  $weekly = 0;
+  $daily = 0;
+
+  foreach ($form_state['values']['companies'] as $company) {
+    if($company['daily'] != 0) {
+      $daily++;
+    }
+    if($company['weekly'] != 0) {
+     $weekly++;
+    }
+
+  }
+  if ($daily > $plan_daily->count) {
+    $args = array(
+        '@plan_daily' => $plan_daily->count,
+        '@daily' => $daily
+       );
+    form_set_error('daily', t('You have selected @daily daily checks.
+                               Your current subscription allows only @plan_daily daily checks',
+                               $args));
+  } else if ($weekly > $plan_weekly->count) {
+    $args = array(
+        '@plan_weekly' => $plan_weekly->count,
+        '@weekly' => $weekly
+    );
+    form_set_error('weekly', t('You have selected @weekly weekly checks.
+                               Your current subscription allows only @plan_weekly weekly checks',
+                               $args));
+  }
+
+}
+
+
+function pozornadph_form_submit($form, &$form_state) {
+  global $user;
+
+  foreach ($form_state['values']['companies'] as $company) {
+    $dic = $company['node']->field_dic['und'][0]['value'];
+    $plan = NULL;
+
+    //Initializing selected plan
+    if ($company['daily'] != 0) {
+      $plan = "1";
+    } else if ($company['weekly'] != 0) {
+      $plan = "0";
+    }
+
+    //Checking if there already is a row for this company in the db
+    $query = db_select('pozornadph_dic','pnd')
+      ->fields('pnd')
+      ->condition('user_id', $user->uid,'=')
+      ->condition('dic', $dic, '=');
+
+    $result = $query
+      ->execute()
+      ->fetchObject();
+
+    if ($result) {
+      if (($company['daily'] == 0 && $company['weekly'] == 0)) {
+        $entry_deleted = db_delete('pozornadph_dic')
+          ->condition('user_id', $user->uid,'=')
+          ->condition('dic', $dic, '=')
+          ->execute();
+
+      } else {
+        $query = db_update('pozornadph_dic')
+          ->fields(array(
+            'plan' => $plan,
+          ))
+          ->condition('user_id', $user->uid,'=')
+          ->condition('dic', $dic, '=')
+          ->execute();
+      }
+
+    } else if (isset($plan)){
+      $query = db_insert('pozornadph_dic')
+      ->fields(array(
+          'dic' => $dic,
+          'plan' => $plan,
+          'user_id' => $user->uid,
+      ))
+      ->execute();
+    }
+
+  }
+
+}
+
+
+/**
+ * Implements hook_mail().
+ */
+function pozornadph_mail($key, &$message, $params) {
+  switch ($key) {
+    case 'notify':
+      watchdog('pozornadph','text to check if mail is sent');
+      $output = '<p>'. t('The following companies have a bad status:') .  '</p>';
+      foreach($params['companies'] as $dic => $title) {
+        $output .= $title . ' (CZ' . $dic . ')<br />';
+      }
+
+      $output .= '<p>';
+      $output .= t('Note: if you don\'t want to receive this email anymore go to pozornadph.cz
+        and set the scanning of the companies with the bad status off.');
+      $output .= '</p>';
+
+      $message['subject'] = t('Notification about the companies');
+      $message['body'] = array($output);
+
+      $message['headers']['Content-Type'] = 'text/html; charset=UTF-8; ';
+
+      break;
+  }
+}
+
+
+/*
+ * Script to connect to the Czech site
+ * */
+
+function pozornadph_check_status($dic) {
+  //dpm($dic);
+  $url = 'http://adisreg.mfcr.cz/adistc/DphReg';
+  $query = array(
+      'ZPRAC' => 'RDPHI1',
+      'id' => '1',
+      'pocet' => '1',
+      'fu' => '',
+      'dic' => $dic,
+      'OK' => '++Hledej++',
+  );
+  $url .= '?' . http_build_query($query);
+//dpm($url);
+  $content = file_get_contents($url);
+
+  $content = iconv('ISO-8859-2', 'UTF-8', $content);
+  //dpm($content);
+
+  if (1 == preg_match('/' . preg_quote('Nespolehliv&yacute; pl&aacute;tce:') . '\s*' . preg_quote('<B>NE</B>', '/') . '/', $content)) {
+    return 1;
+  }
+  elseif (1 == preg_match('/' . preg_quote('Nespolehliv&yacute; pl&aacute;tce:') . '\s*' . preg_quote('<B>ANO</B>', '/') . '/', $content)) {
+    return 0;
+  }
+  else {
+    // invalid number
+    if (1 == preg_match('/' . preg_quote('Pro zadan&yacute; kmenov&yacute; k&oacute;d DIČ:&nbsp;') . '\s*' . preg_quote($dic) . '\s*' . preg_quote('&nbsp;nebyla nalezena ž&aacute;dn&aacute; registrace pl&aacute;tce DPH') . '/', $content) or
+        FALSE !== strpos($content, 'Chybně zadan&eacute; DIČ ve vstupn&iacute;m formul&aacute;ři')) {
+      return 2;
+    }
+    else {
+      return 3;
+    }
+  }
+
+}
+
+
+
+/**
+ * Implements hook_cron().
+ */
+
+function pozornadph_cron() {
+  global $user;
+
+  $updated = array();
+
+  $day_ago = strtotime('-1 day', time());
+  $week_ago = strtotime('-7 days', time());
+
+  $and_q1 = db_and();
+
+  $and_q1
+    ->condition('plan','1','=')
+    ->condition('last_scanned',$day_ago,'<');
+
+  $and_q2 = db_and();
+
+  $and_q2
+    ->condition('plan','0','=')
+    ->condition('last_scanned',$week_ago,'<');
+
+  $or_q = db_or();
+
+  $or_q->condition($and_q1);
+  $or_q->condition($and_q2);
+  $or_q->isNull('last_scanned');
+
+  $db_query = db_select('pozornadph_dic','pnd')
+    ->fields('pnd',array('dic'))
+    ->condition($or_q)
+    ->distinct();
+
+  $result = $db_query->execute();
+
+  while($dic = $result->fetchAssoc()){
+
+    $dic['status'] = pozornadph_check_status($dic['dic']);
+
+    $query_update = db_update('pozornadph_dic')
+          ->fields(array(
+            'status' => $dic['status'],
+            'last_scanned' => time(),
+          ))
+          ->condition('dic',$dic['dic'],'=')
+          ->condition($or_q)
+
+          ->execute();
+  }
+
+
+  //Remove expired checks
+
+  //Get amount of allowed daily checks
+  $allowed_daily = pozornadph_get_daily_checks();
+
+  //Get amount of allowed weekly checks
+  $allowed_weekly = pozornadph_get_weekly_checks();
+
+  //Get amount of enabled daily checks
+  $query = db_select('pozornadph_dic','pnd')
+  ->fields('pnd')
+  ->condition('user_id', $user->uid,'=')
+  ->condition('plan','1','=');
+  $query->addExpression('COUNT(id)', 'count');
+  $enabled_daily = $query
+  ->execute()
+  ->fetchObject();
+
+
+  //Get amount of enabled weekly checks
+  $query = db_select('pozornadph_dic','pnd')
+  ->fields('pnd')
+  ->condition('user_id', $user->uid,'=')
+  ->condition('plan','0','=');
+  $query->addExpression('COUNT(id)', 'count');
+  $enabled_weekly = $query
+  ->execute()
+  ->fetchObject();
+
+
+  if ($enabled_daily->count > $allowed_daily->count) {
+    $to_remove = $enabled_daily->count - $allowed_daily->count;
+
+    $to_remove = db_select('pozornadph_dic','pnd')
+    ->fields('pnd', array('id'))
+    ->condition('user_id', $user->uid,'=')
+    ->condition('plan', '1','=')
+    ->range(0,$to_remove)
+    ->orderBy('pnd.id','DESC')
+    ->execute();
+
+    foreach ($to_remove as $row) {
+      db_delete('pozornadph_dic')
+      ->condition('id',$row->id,'=')
+      ->execute();
+    }
+
+  }
+
+  if ($enabled_weekly->count > $allowed_weekly->count) {
+    $to_remove = $enabled_weekly->count - $allowed_weekly->count;
+
+    $to_remove = db_select('pozornadph_dic','pnd')
+    ->fields('pnd', array('id'))
+    ->condition('user_id', $user->uid,'=')
+    ->condition('plan', '0','=')
+    ->range(0,$to_remove)
+    ->orderBy('pnd.id','DESC')
+    ->execute();
+
+    foreach ($to_remove as $row) {
+      db_delete('pozornadph_dic')
+      ->condition('id',$row->id,'=')
+      ->execute();
+    }
+
+  }
+
+
+  //Sending email functionality
+  //watchdog('pozornadph','text to check if mail is sent');
+
+  global $user;
+  $companies_to_notify_about = array();
+
+  //Check if there are enabled checks with bad status and send email about them
+  $query = db_select('pozornadph_dic','pnd')
+  ->fields('pnd')
+  ->condition('user_id', $user->uid,'=')
+  ->condition('status','0');
+
+  $result = $query->execute();
+
+  foreach ($result as $row) {
+    $query_entity = new EntityFieldQuery();
+
+    $query_entity->entityCondition('entity_type', 'node')
+    ->entityCondition('bundle', 'company')
+    ->propertyCondition('uid', $user->uid)
+    ->fieldCondition('field_dic', 'value', $row->dic, '=');
+
+    $result = $query_entity->execute();
+
+    if (isset($result['node'])) {
+      $company_nid = array_keys($result['node']);
+      $company = entity_load('node', $company_nid);
+      $companies_to_notify_about[$company[$company_nid[0]]->field_dic['und'][0]['value']] = $company[$company_nid[0]]->title;
+    }
+  }
+
+  //Send email if there are companies with bad status
+  if(!empty($companies_to_notify_about)) {
+    $module = 'pozornadph';
+    $key = 'notify';
+
+    $user_fields = user_load($user->uid);
+
+    $notify_address = $user_fields->field_email_for_sending_alerts['und'][0]['email'];
+
+    drupal_mail($module, $key, $notify_address, NULL, array('companies' => $companies_to_notify_about));
+
+    if(isset($user_fields->field_alternative_email_for_send['und'][0]['email'])) {
+      $alternative_notify_address = $user_fields->field_alternative_email_for_send['und'][0]['email'];
+      drupal_mail($module, $key, $alternative_notify_address, NULL, array('companies' => $companies_to_notify_about));
+
+    }
+
+  }
+
+}
+
+function pozornadph_theme() {
+  return array(
+      'pozornadph_page' => array(
+          'template' => 'pozornadph_page',
+      ),
+      'pozornadph_form' => array(
+          'render element' => 'form',
+      ),
+  );
+}
+
+
+//After the order's status is set to Completed inserts the rows in the db
+function pozornadph_commerce_order_presave($order) {
+drupal_set_message('kuku');
+  //Get product ids
+  $products_id = array();
+
+  dpm($order->status);
+  if ($order->status == 'completed') {
+    foreach ($order->commerce_line_items['und'] as $line) {
+      $line_item = commerce_line_item_load($line['line_item_id']);
+      $products_id[] = $line_item->commerce_product['und'][0]['product_id'];
+    }
+
+
+  }
+
+
+
+  if ($order->is_new && $order->status == 'completed') {
+    foreach ($products_id as $product_id) {
+
+      $product = commerce_product_load($product_id);
+
+      //Calculate the end date
+      $duration_in_months = $product->field_duration['und'][0]['value'];
+      $end_date = strtotime('+' . $duration_in_months . 'months', time());
+
+      $number_of_rows_to_insert = $product->field_variant['und'][0]['value'];
+
+      //Insert the rows in the db
+      for ($i=0; $i<$number_of_rows_to_insert; $i++) {
+       $db_line_id = db_insert('pozornadph')
+        ->fields(array(
+          'plan' => $product->field_plan['und'][0]['value'],
+          'user_id' => $order->uid,
+          'start_date' => time(),
+          'end_date' => $end_date
+        ))
+        ->execute();
+      }
+    }
+
+  } else if (!$order->is_new && $order->status == 'completed') {
+
+     foreach ($products_id as $product_id) {
+
+      $product = commerce_product_load($product_id);
+
+      //Calculate the end date
+      $duration_in_months = $product->field_duration['und'][0]['value'];
+      $end_date = strtotime('+' . $duration_in_months . 'months', time());
+
+      $number_of_rows_to_insert = $product->field_variant['und'][0]['value'];
+
+      //Insert the rows in the db
+      for ($i=0; $i<$number_of_rows_to_insert; $i++) {
+       $db_line_id = db_insert('pozornadph')
+        ->fields(array(
+          'plan' => $product->field_plan['und'][0]['value'],
+          'user_id' => $order->uid,
+          'start_date' => time(),
+          'end_date' => $end_date
+        ))
+        ->execute();
+      }
+    }
+
+  }
+}
+
+/**
+ * Implements hook_field_widget_form_alter().
+ */
+
+function pozornadph_field_widget_form_alter(&$element, &$form_state, $context) {
+  if($context['field']['field_name'] == 'field_dic') {
+    $element['value']['#field_prefix'] = 'CZ';
+  }
+}

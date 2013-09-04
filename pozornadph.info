@@ -1,0 +1,6 @@
+name = Pozornadph
+description = Checking the VAT numbers.
+package = "Custom"
+core = 7.x
+
+files[] = pozornadph.module
